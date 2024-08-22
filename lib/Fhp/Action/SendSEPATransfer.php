@@ -8,6 +8,7 @@ use Fhp\Protocol\BPD;
 use Fhp\Protocol\Message;
 use Fhp\Protocol\UnexpectedResponseException;
 use Fhp\Protocol\UPD;
+use Fhp\Segment\Common\Btg;
 use Fhp\Segment\Common\Kti;
 use Fhp\Segment\HIRMS\Rueckmeldungscode;
 use Fhp\Segment\SPA\HISPAS;
@@ -51,7 +52,9 @@ class SendSEPATransfer extends BaseAction
         $xmlAsObject = simplexml_load_string($this->painMessage, "SimpleXMLElement", LIBXML_NOCDATA);
         $numberOfTransactions = $xmlAsObject->CstmrCdtTrfInitn->GrpHdr->NbOfTxs;
         $hasReqdExDates = false;
+        $CtrlSum = 0.00;
         foreach ($xmlAsObject->CstmrCdtTrfInitn?->PmtInf as $pmtInfo) {
+            $CtrlSum += (float)$pmtInfo->CtrlSum;
             // Checks for both, <ReqdExctnDt>1999-01-01</ReqdExctnDt> and <ReqdExctnDt><Dt>1999-01-01</Dt></ReqdExctnDt>
             if (isset($pmtInfo->ReqdExctnDt) && ($pmtInfo->ReqdExctnDt->Dt ?? $pmtInfo->ReqdExctnDt) != '1999-01-01') {
                 $hasReqdExDates = true;
@@ -65,6 +68,7 @@ class SendSEPATransfer extends BaseAction
             // Terminierte SEPA-Sammelüberweisung (Segment HKCME / Kennung HICMES)
             $segmentID = 'HICMES';
             $segment = \Fhp\Segment\CME\HKCMEv1::createEmpty();
+            $segment->summenfeld = Btg::create($CtrlSum);
         } elseif ($numberOfTransactions == 1 && $hasReqdExDates) {
 
             // Terminierte SEPA-Überweisung (Segment HKCSE / Kennung HICSES)
@@ -75,6 +79,7 @@ class SendSEPATransfer extends BaseAction
             // SEPA-Sammelüberweisungen (Segment HKCCM / Kennung HICCMS)
             $segmentID = 'HICCMS';
             $segment = \Fhp\Segment\CCM\HKCCMv1::createEmpty();
+            $segment->summenfeld = Btg::create($CtrlSum);
         } else {
 
             //SEPA Einzelüberweisung (Segment HKCCS / Kennung HICCSS).
