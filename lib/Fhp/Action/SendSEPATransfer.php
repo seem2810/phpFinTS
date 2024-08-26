@@ -50,8 +50,8 @@ class SendSEPATransfer extends BaseAction
         //ANALYSE XML FOR RECEIPTS AND PAYMENT DATE
         $xmlAsObject = simplexml_load_string($this->painMessage, "SimpleXMLElement", LIBXML_NOCDATA);
         $numberOfTransactions = $xmlAsObject->CstmrCdtTrfInitn->GrpHdr->NbOfTxs;
+        $CtrlSum = $xmlAsObject->CstmrCdtTrfInitn->GrpHdr->CtrlSum;
         $hasReqdExDates = false;
-        $CtrlSum = 0.00;
         foreach ($xmlAsObject->CstmrCdtTrfInitn?->PmtInf as $pmtInfo) {
             $CtrlSum += (float)$pmtInfo->CtrlSum;
             // Checks for both, <ReqdExctnDt>1999-01-01</ReqdExctnDt> and <ReqdExctnDt><Dt>1999-01-01</Dt></ReqdExctnDt>
