@@ -66,6 +66,7 @@ class SendSEPATransfer extends BaseAction
                     throw new UnsupportedException('Terminierte SEPA-Sammelüberweisung (Segment HKCME / Kennung HICMES) requires all entries to be in future');
                 }
             }
+            if (isset($pmtInfo->BtchBookg)) $batchBooking = (string)$pmtInfo->BtchBookg == 'true';
         }
 
 
