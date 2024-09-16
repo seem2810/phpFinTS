@@ -53,8 +53,10 @@ class SendSEPATransfer extends BaseAction
         $numberOfTransactions = $xmlAsObject->CstmrCdtTrfInitn->GrpHdr->NbOfTxs;
         $CtrlSum = round((float)$xmlAsObject->CstmrCdtTrfInitn->GrpHdr->CtrlSum, 2);
         $hasReqdExDates = false;
+        $batchBooking = false;
         foreach ($xmlAsObject->CstmrCdtTrfInitn?->PmtInf as $pmtInfo) {
             if (isset($pmtInfo->ReqdExctnDt) && $pmtInfo->ReqdExctnDt != '1999-01-01') $hasReqdExDates = true;
+            if (isset($pmtInfo->BtchBookg)) $batchBooking = (string)$pmtInfo->BtchBookg == 'true';
         }
 
 
@@ -65,6 +67,7 @@ class SendSEPATransfer extends BaseAction
             $segmentID = 'HICMES';
             $segment = \Fhp\Segment\CME\HKCMEv1::createEmpty();
             $segment->summenfeld = Btg::create($CtrlSum);
+            $segment->einzelbuchungGewuenscht = $batchBooking;
         } elseif ($numberOfTransactions == 1 && $hasReqdExDates) {
 
             // Terminierte SEPA-Überweisung (Segment HKCSE / Kennung HICSES)
@@ -76,6 +79,7 @@ class SendSEPATransfer extends BaseAction
             $segmentID = 'HICCMS';
             $segment = \Fhp\Segment\CCM\HKCCMv1::createEmpty();
             $segment->summenfeld = Btg::create($CtrlSum);
+            $segment->einzelbuchungGewuenscht = $batchBooking;
         } else {
 
             //SEPA Einzelüberweisung (Segment HKCCS / Kennung HICCSS).
@@ -98,6 +102,7 @@ class SendSEPATransfer extends BaseAction
         $segment->kontoverbindungInternational = Kti::fromAccount($this->account);
         $segment->sepaDescriptor = $this->xmlSchema;
         $segment->sepaPainMessage = new Bin($this->painMessage);
+
         return $segment;
     }
 
