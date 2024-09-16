@@ -282,7 +282,7 @@ class FinTs
             throw new \RuntimeException('Need to login (DialogInitialization) before executing other actions');
         }
 
-        $requestSegments = $action->getNextRequest($this->bpd, $this->upd);
+        $requestSegments = $action->getNextRequest($this->getBpd(), $this->upd);
 
         if (count($requestSegments) === 0) {
             return; // No request needed.
