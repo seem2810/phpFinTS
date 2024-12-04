@@ -63,6 +63,16 @@ class SendSEPATransfer extends BaseAction
             if (isset($pmtInfo->BtchBookg)) $batchBooking = (string)$pmtInfo->BtchBookg == 'true';
         }
 
+        //CHECK IF $hasReqdExDates and set other to tomorrow
+        if ($hasReqdExDates) {
+            foreach ($xmlAsObject->CstmrCdtTrfInitn?->PmtInf as $pmtInfo) {
+                if (isset($pmtInfo->ReqdExctnDt) && $pmtInfo->ReqdExctnDt == '1999-01-01') {
+                    throw new UnsupportedException('Terminierte SEPA-Sammelüberweisung (Segment HKCME / Kennung HICMES) requires all entries to be in future');
+                }
+            }
+        }
+
+
         //NOW READ OUT, WICH SEGMENT SHOULD BE USED:
         if ($numberOfTransactions > 1 && $hasReqdExDates) {
 
