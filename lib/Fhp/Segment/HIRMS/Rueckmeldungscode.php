@@ -89,6 +89,12 @@ abstract class Rueckmeldungscode
 
     public const VOP_NAMENSABGLEICH_IST_KOMPLETT = 3094;
 
+    public const VOP_KEINE_NAMENSABWEICHUNG = 0025;
+
+    public const VOP_ERGEBNIS_NAMENSABGLEICH_PRUEFEN = 3090;
+
+    public const VOP_AUSFUEHRUNGSAUFTRAG_NICHT_BENOETIGT = 3091;
+
     /**
      * Zugelassene Ein- und Zwei-Schritt-Verfahren für den Benutzer (+ Rückmeldungsparameter).
      * The parameters reference the VerfahrensparameterZweiSchrittVerfahren.sicherheitsfunktion values (900..997) from
