@@ -4,6 +4,7 @@
 
 namespace Fhp;
 
+use Fhp\Model\PollingToken;
 use Fhp\Model\TanRequest;
 use Fhp\Protocol\ActionIncompleteException;
 use Fhp\Protocol\BPD;
@@ -47,6 +48,9 @@ abstract class BaseAction implements \Serializable
 
     /** If set, the last response from the server regarding this action asked for a TAN from the user. */
     protected ?TanRequest $tanRequest = null;
+
+    /** If set, this action is currently waiting for a long-running operation on the server to complete. */
+    protected ?PollingToken $pollingToken = null;
 
     protected bool $isDone = false;
 
@@ -137,6 +141,16 @@ abstract class BaseAction implements \Serializable
     public function getTanRequest(): ?TanRequest
     {
         return $this->tanRequest;
+    }
+
+    public function needsPollingWait(): bool
+    {
+        return !$this->isDone() && $this->pollingToken !== null;
+    }
+
+    public function getPollingToken(): ?PollingToken
+    {
+        return $this->pollingToken;
     }
 
     /**
@@ -247,5 +261,11 @@ abstract class BaseAction implements \Serializable
     final public function setTanRequest(?TanRequest $tanRequest): void
     {
         $this->tanRequest = $tanRequest;
+    }
+
+    /** To be called only by the FinTs instance that executes this action. */
+    final public function setPollingToken(?PollingToken $pollingToken): void
+    {
+        $this->pollingToken = $pollingToken;
     }
 }
