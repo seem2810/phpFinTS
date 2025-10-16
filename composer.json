@@ -2,7 +2,7 @@
   "name": "seem2810/php-fints",
   "description": "PHP Library for the protocols fints and hbci",
   "homepage": "https://github.com/seem2810/phpFinTS",
-  "version": "3.7.0",
+  "version": "3.7.1",
   "license": "MIT",
   "autoload": {
     "psr-0": {
