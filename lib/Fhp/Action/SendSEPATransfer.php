@@ -33,18 +33,19 @@ class SendSEPATransfer extends BaseAction
      *     to create this.
      * @return SendSEPATransfer A new action for executing this the given PAIN message.
      */
-    public static function create(SEPAAccount $account, string $painMessage): static
+    public static function create(SEPAAccount $account, string $painMessage): SendSEPATransfer
     {
         if (preg_match('/xmlns="(.*?)"/', $painMessage, $match) === false) {
             throw new \InvalidArgumentException('xmlns not found in the PAIN message');
         }
-        $result = new static();
+        $result = new SendSEPATransfer();
         $result->account = $account;
         $result->painMessage = $painMessage;
         $result->xmlSchema = $match[1];
         return $result;
     }
 
+    /** {@inheritdoc} */
     protected function createRequest(BPD $bpd, ?UPD $upd)
     {
         //ANALYSE XML FOR RECEIPTS AND PAYMENT DATE
@@ -54,19 +55,7 @@ class SendSEPATransfer extends BaseAction
         $hasReqdExDates = false;
         $batchBooking = false;
         foreach ($xmlAsObject->CstmrCdtTrfInitn?->PmtInf as $pmtInfo) {
-            $CtrlSum += (float)$pmtInfo->CtrlSum;
-            // Checks for both, <ReqdExctnDt>1999-01-01</ReqdExctnDt> and <ReqdExctnDt><Dt>1999-01-01</Dt></ReqdExctnDt>
-            if (isset($pmtInfo->ReqdExctnDt) && ($pmtInfo->ReqdExctnDt->Dt ?? $pmtInfo->ReqdExctnDt) != '1999-01-01') $hasReqdExDates = true;
-            if (isset($pmtInfo->BtchBookg)) $batchBooking = (string)$pmtInfo->BtchBookg == 'true';
-        }
-
-        //CHECK IF $hasReqdExDates and set other to tomorrow
-        if ($hasReqdExDates) {
-            foreach ($xmlAsObject->CstmrCdtTrfInitn?->PmtInf as $pmtInfo) {
-                if (isset($pmtInfo->ReqdExctnDt) && $pmtInfo->ReqdExctnDt == '1999-01-01') {
-                    throw new UnsupportedException('Terminierte SEPA-Sammelüberweisung (Segment HKCME / Kennung HICMES) requires all entries to be in future');
-                }
-            }
+            if (isset($pmtInfo->ReqdExctnDt) && $pmtInfo->ReqdExctnDt != '1999-01-01') $hasReqdExDates = true;
             if (isset($pmtInfo->BtchBookg)) $batchBooking = (string)$pmtInfo->BtchBookg == 'true';
         }
 
@@ -112,19 +101,9 @@ class SendSEPATransfer extends BaseAction
         }
 
         /** @var HISPAS $hispas */
-        $hispas = $bpd->requireLatestSupportedParameters('HISPAS');
-        $supportedSchemas = $hispas->getParameter()->getUnterstuetzteSEPADatenformate();
-
-        // Sometimes the Bank reports supported schemas with a "_GBIC_X" postfix.
-        // GIBC_X stands for German Banking Industry Committee and a version counter.
-        $xmlSchema = $this->xmlSchema;
-        $matchingSchemas = array_filter($supportedSchemas, function($value) use ($xmlSchema) {
-            // For example urn:iso:std:iso:20022:tech:xsd:pain.001.001.09 from the xml matches
-            // urn:iso:std:iso:20022:tech:xsd:pain.001.001.09_GBIC_4
-            return str_starts_with($value, $xmlSchema);
-        });
-
-        if (count($matchingSchemas) === 0) {
+        $parameters = $bpd->requireLatestSupportedParameters('HISPAS');
+        $supportedSchemas = $parameters->getParameter()->getUnterstuetzteSepaDatenformate();
+        if (!in_array($this->xmlSchema, $supportedSchemas)) {
             throw new UnsupportedException("The bank does not support the XML schema $this->xmlSchema, but only "
                 . implode(', ', $supportedSchemas));
         }
@@ -136,6 +115,7 @@ class SendSEPATransfer extends BaseAction
         return $segment;
     }
 
+    /** {@inheritdoc} */
     public function processResponse(Message $response)
     {
         parent::processResponse($response);

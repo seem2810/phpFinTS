@@ -2,7 +2,7 @@
   "name": "seem2810/php-fints",
   "description": "PHP Library for the protocols fints and hbci",
   "homepage": "https://github.com/seem2810/phpFinTS",
-  "version": "3.5.0",
+  "version": "3.7.0",
   "license": "MIT",
   "autoload": {
     "psr-0": {
@@ -17,9 +17,9 @@
     "ext-mbstring": "*"
   },
   "require-dev": {
-    "phpunit/phpunit": "9.5.*",
-    "php-mock/php-mock-phpunit": "2.6.*",
-    "friendsofphp/php-cs-fixer": "3.*"
+    "phpunit/phpunit": "^9.5",
+    "php-mock/php-mock-phpunit": "^2.6",
+    "friendsofphp/php-cs-fixer": "^3.0"
   },
   "suggest": {
     "monolog/monolog": "Allow sending log messages to a variety of different handlers",
