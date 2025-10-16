@@ -52,16 +52,30 @@ class SendSEPARealtimeTransfer extends BaseAction
         return $result;
     }
 
-    /** {@inheritdoc} */
     protected function createRequest(BPD $bpd, ?UPD $upd)
     {
         /** @var HIIPZSv1|HIIPZSv2 $hiipzs */
         $hiipzs = $bpd->requireLatestSupportedParameters('HIIPZS');
 
-        /** @var HISPAS $hispas */
-        $hispas = $bpd->requireLatestSupportedParameters('HISPAS');
-        $supportedSchemas = $hispas->getParameter()->getUnterstuetzteSepaDatenformate();
-        if (!in_array($this->xmlSchema, $supportedSchemas)) {
+        $supportedSchemas = $hiipzs->parameter->getUnterstuetzteSEPADatenformate();
+
+        // If there are no SEPA formats available in the HIIPZS Parameters, we look to the general formats
+        if (is_null($supportedSchemas)) {
+            /** @var HISPAS $hispas */
+            $hispas = $bpd->requireLatestSupportedParameters('HISPAS');
+            $supportedSchemas = $hispas->getParameter()->getUnterstuetzteSEPADatenformate();
+        }
+
+        // Sometimes the Bank reports supported schemas with a "_GBIC_X" postfix.
+        // GIBC_X stands for German Banking Industry Committee and a version counter.
+        $xmlSchema = $this->xmlSchema;
+        $matchingSchemas = array_filter($supportedSchemas, function($value) use ($xmlSchema) {
+            // For example urn:iso:std:iso:20022:tech:xsd:pain.001.001.09 from the xml matches
+            // urn:iso:std:iso:20022:tech:xsd:pain.001.001.09_GBIC_4
+            return str_starts_with($value, $xmlSchema);
+        });
+
+        if (count($matchingSchemas) === 0) {
             throw new UnsupportedException("The bank does not support the XML schema $this->xmlSchema, but only "
                 . implode(', ', $supportedSchemas));
         }
@@ -77,7 +91,6 @@ class SendSEPARealtimeTransfer extends BaseAction
         return $hkipz;
     }
 
-    /** {@inheritdoc} */
     public function processResponse(Message $response)
     {
         parent::processResponse($response);
