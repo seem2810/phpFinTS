@@ -26,6 +26,9 @@ use Fhp\Segment\TAN\HITAN;
 use Fhp\Segment\TAN\HKTAN;
 use Fhp\Segment\TAN\HKTANFactory;
 use Fhp\Segment\TAN\HKTANv6;
+use Fhp\Segment\VPP\HKVPPv1;
+use Fhp\Segment\VPP\VopHelper;
+use Fhp\Segment\VPP\VopPollingToken;
 use Fhp\Syntax\InvalidResponseException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -201,7 +204,7 @@ class FinTs
      *
      * @throws \InvalidArgumentException
      */
-    public function loadPersistedInstance(string $persistedInstance)
+    public function loadPersistedInstance(string $persistedInstance): void
     {
         $unserialized = unserialize($persistedInstance);
         if (!is_array($unserialized) || count($unserialized) === 0) {
@@ -216,7 +219,7 @@ class FinTs
         }
     }
 
-    private function loadPersistedInstanceVersion2(array $data)
+    private function loadPersistedInstanceVersion2(array $data): void
     {
         list( // This should match persist().
             $this->bpd,
@@ -254,7 +257,7 @@ class FinTs
      * @param int $responseTimeout The number of seconds to wait before aborting a request to the bank server.
      * @noinspection PhpUnused
      */
-    public function setTimeouts(int $connectTimeout, int $responseTimeout)
+    public function setTimeouts(int $connectTimeout, int $responseTimeout): void
     {
         $this->options->timeoutConnect = $connectTimeout;
         $this->options->timeoutResponse = $responseTimeout;
@@ -285,7 +288,7 @@ class FinTs
 
     /**
      * Executes an action. Be sure to {@link login()} first. See the `\Fhp\Action` package for actions that can be
-     * executed with this function. Note that, after this function returns, the action can be in two possible states:
+     * executed with this function. Note that, after this function returns, the action can be in the following states:
      * 1. If {@link BaseAction::needsTan()} returns true, the action isn't completed yet because needs a TAN or other
      *    kind of two-factor authentication (2FA). In this case, use {@link BaseAction::getTanRequest()} to get more
      *    information about the TAN/2FA that is needed. Your application then needs to interact with the user to obtain
@@ -293,9 +296,24 @@ class FinTs
      *    be verified with {@link checkDecoupledSubmission()}). Both of those functions require passing the same
      *    {@link BaseAction} argument as an argument, and once they succeed, the action will be in the same completed
      *    state as if it had been completed right away.
-     * 2. If {@link BaseAction::needsTan()} returns false, the action was completed right away. Use the respective
-     *    getters on the action instance to retrieve the result. In case the action fails, the corresponding exception
-     *    will be thrown from this function.
+     * 2. If {@link BaseAction::needsPollingWait()} returns true, the action isn't completed yet because the server is
+     *    still running some slow operation. Importantly, the server has not necessarily accepted the action yet, so it
+     *    is absolutely required that the client keeps polling if they don't want the action to be abandoned.
+     *    In this case, use {@link BaseAction::getPollingToken()} to get more information on how frequently to poll, and
+     *    do the polling through {@link pollAction()}.
+     * 3. If {@link BaseAction::needsVopConfirmation()} returns true, the action isn't completed yet because the payee
+     *    information couldn't be matched automatically, so an explicit confirmation from the user is required. In this
+     *    case, use TODO.
+     * 4. If none of the above return true, the action was completed right away.
+     *    Use the respective getters on the action instance to retrieve the result. In case the action fails, the
+     *    corresponding exception will be thrown from this function.
+     *
+     * Note that all conditions above that leave the action in an incomplete state require some action from the client
+     * application. These actions then change the state of the action again, but they don't necessarily complete it.
+     * In practice, the typical sequence is: Maybe polling, maybe VoP confirmation, maybe TAN, done. That said, you
+     * should ideally implement your application to deal with any sequence of states. Just execute the action, check
+     * what's state it's in, resolve that state as appropriate, and then check again (using the same code as before). Do
+     * this repeatedly until none of the special conditions above happen anymore, at which point the action is done.
      *
      * @param BaseAction $action The action to be executed. Its {@link BaseAction::isDone()} status will be updated when
      *     this function returns successfully.
@@ -304,27 +322,37 @@ class FinTs
      * @throws ServerException When the server responds with a (FinTS-encoded) error message, which includes most things
      *     that can go wrong with the action itself, like wrong credentials, invalid IBANs, locked accounts, etc.
      */
-    public function execute(BaseAction $action)
+    public function execute(BaseAction $action): void
     {
         if ($this->dialogId === null && !($action instanceof DialogInitialization)) {
             throw new \RuntimeException('Need to login (DialogInitialization) before executing other actions');
         }
 
+        // Add the action's main request segments.
         $requestSegments = $action->getNextRequest($this->getBpd(), $this->upd);
 
         if (count($requestSegments) === 0) {
             return; // No request needed.
         }
+        $message = MessageBuilder::create()->add($requestSegments);
 
-        // Construct the full request message.
-        $message = MessageBuilder::create()->add($requestSegments); // This fills in the segment numbers.
+        // Add HKTAN for authentication if necessary.
         if (!($this->getSelectedTanMode() instanceof NoPsd2TanMode)) {
             if (($needTanForSegment = $action->getNeedTanForSegment()) !== null) {
                 $hktan = HKTANFactory::createProzessvariante2Step1($this->requireTanMode(), $this->selectedTanMedium, $needTanForSegment);
                 $message->add($hktan);
             }
         }
-        $request = $this->buildMessage($message, $this->getSelectedTanMode());
+
+        // Add HKVPP for VoP verification if necessary.
+        $hkvpp = null;
+        if ($this->bpd?->vopRequiredForRequest($requestSegments) !== null) {
+            $hkvpp = VopHelper::createHKVPPForInitialRequest($this->bpd);
+            $message->add($hkvpp);
+        }
+
+        // Construct the request and tell the action about the segment numbers that were assigned.
+        $request = $this->buildMessage($message, $this->getSelectedTanMode()); // This fills in the segment numbers.
         $action->setRequestSegmentNumbers(array_map(function ($segment) {
             /* @var BaseSegment $segment */
             return $segment->getSegmentNumber();
@@ -332,6 +360,22 @@ class FinTs
 
         // Execute the request.
         $response = $this->sendMessage($request);
+        $this->processServerResponse($action, $response, $hkvpp);
+    }
+
+    /**
+     * Updates the state of this FinTs instance and of the `$action` based on the server's response.
+     * See {@link execute()} for more documentation on the possible outcomes.
+     * @param BaseAction $action The action for which the request was sent.
+     * @param Message $response The response we just got from the server.
+     * @param HKVPPv1|null $hkvpp The HKVPP segment, if any was present in the request.
+     * @throws CurlException When the connection fails in a layer below the FinTS protocol.
+     * @throws UnexpectedResponseException When the server responds with a valid but unexpected message.
+     * @throws ServerException When the server responds with a (FinTS-encoded) error message, which includes most things
+     *      that can go wrong with the action itself, like wrong credentials, invalid IBANs, locked accounts, etc.
+     */
+    private function processServerResponse(BaseAction $action, Message $response, ?HKVPPv1 $hkvpp = null): void
+    {
         $this->readBPD($response);
 
         // Detect if the bank wants a TAN.
@@ -359,6 +403,17 @@ class FinTs
             $requestSegmentsNumbers[] = $hktan->getSegmentNumber();
         }
         $this->processActionResponse($action, $response->filterByReferenceSegments($requestSegmentsNumbers));
+
+        // Detect if the bank needs us to do something for Verification of Payee.
+        if ($hkvpp != null) {
+            if ($pollingToken = VopHelper::checkPollingRequired($response, $hkvpp->getSegmentNumber())) {
+                $action->setPollingToken($pollingToken);
+                return;
+            }
+        }
+
+        // If no TAN or VOP is needed, process the response normally, and maybe keep going for more pages.
+        $this->processActionResponse($action, $response->filterByReferenceSegments($action->getRequestSegmentNumbers()));
         if ($action instanceof PaginateableAction && $action->hasMorePages()) {
             $this->execute($action);
         }
@@ -369,9 +424,9 @@ class FinTs
      * `false`, this function sends the given $tan to the server to complete the action. By using {@link persist()},
      * this can be done asynchronously, i.e., not in the same PHP process as the original {@link execute()} call.
      *
-     * After this function returns, the `$action` is completed. That is, its result is available through its getters
-     * just as if it had been completed by the original call to {@link execute()} right away. In case the action fails,
-     * the corresponding exception will be thrown from this function.
+     * After this function returns, the `$action` is in any of the same states as after {@link execute()}, see there.
+     * In practice, the action is fully completed after completing the decoupled submission.
+     * In case the action fails, the corresponding exception will be thrown from this function.
      *
      * @link https://www.hbci-zka.de/dokumente/spezifikation_deutsch/fintsv3/FinTS_3.0_Security_Sicherheitsverfahren_PINTAN_2020-07-10_final_version.pdf
      * Section B.4.2.1.1
@@ -383,7 +438,7 @@ class FinTs
      * @throws ServerException When the server responds with a (FinTS-encoded) error message, which includes most things
      *     that can go wrong with the action itself, like wrong credentials, invalid IBANs, locked accounts, etc.
      */
-    public function submitTan(BaseAction $action, string $tan)
+    public function submitTan(BaseAction $action, string $tan): void
     {
         // Check the action's state.
         $tanRequest = $action->getTanRequest();
@@ -437,7 +492,9 @@ class FinTs
      * For an action where {@link BaseAction::needsTan()} returns `true` and {@link TanMode::isDecoupled()} returns
      * `true`, this function checks with the server whether the second factor authentication has been completed yet on
      * the secondary device of the user.
-     * -   If so, this completes the given action and returns `true`.
+     * -   If so, this function returns `true` and the `$action` is then in any of the same states as after
+     *     {@link execute()} (except {@link BaseAction::needsTan()} won't happen again). See there for documentation.
+     *     In practice, the action is fully completed after completing the decoupled submission.
      * -   In case the action fails, the corresponding exception will be thrown from this function.
      * -   If the authentication has not been completed yet, this returns `false` and the action remains in its
      *     previous, uncompleted state.
@@ -453,9 +510,10 @@ class FinTs
      * Section B.4.2.2
      *
      * @param BaseAction $action The action to be completed.
-     * @return bool True if the decoupled authentication is done and the $action was completed. If false, the
-     *     {@link TanRequest} inside the action has been updated, which *may* provide new/more instructions to the user,
-     *     though probably it rarely does in practice.
+     * @return bool True if the decoupled authentication is done and the $action was completed or entered one of the
+     *     other states documented on {@link execute()}.
+     *     If false, the {@link TanRequest} inside the action has been updated, which *may* provide new/more
+     *     instructions to the user, though probably it rarely does in practice.
      * @throws CurlException When the connection fails in a layer below the FinTS protocol.
      * @throws UnexpectedResponseException When the server responds with a valid but unexpected message.
      * @throws ServerException When the server responds with a (FinTS-encoded) error message, which includes most things
@@ -535,6 +593,52 @@ class FinTs
     }
 
     /**
+     * For an action where {@link BaseAction::needsPollingWait()} returns `true`, this function polls the server.
+     * By using {@link persist()}, this can be done asynchronously, i.e., not in the same PHP process as the original
+     * {@link execute()} call or the previous {@link pollAction()} call.
+     *
+     * After this function returns, the `$action` is in any of the same states as after {@link execute()}, see there. In
+     * particular, it's possible that the long-running operation on the server has not completed yet and thus
+     * {@link BaseAction::needsPollingWait()} still returns `true`. In practice, actions often require VoP confirmation
+     * or a TAN after the polling is over, though they can also complete right away.
+     * In case the action fails, the corresponding exception will be thrown from this function.
+     *
+     * @param BaseAction $action The action to be completed.
+     * @throws CurlException When the connection fails in a layer below the FinTS protocol.
+     * @throws UnexpectedResponseException When the server responds with a valid but unexpected message.
+     * @throws ServerException When the server responds with a (FinTS-encoded) error message, which includes most things
+     *     that can go wrong with the action itself, like wrong credentials, invalid IBANs, locked accounts, etc.
+     * @link FinTS_3.0_Messages_Geschaeftsvorfaelle_VOP_1.01_2025_06_27_FV.pdf
+     * Section C.10.7.1.1 a)
+     *
+     */
+    public function pollAction(BaseAction $action): void
+    {
+        $pollingToken = $action->getPollingToken();
+        if ($pollingToken === null) {
+            throw new \InvalidArgumentException('This action is not awaiting polling for a long-running operation');
+        } elseif ($pollingToken instanceof VopPollingToken) {
+            // Only send a new HKVPP.
+            $hkvpp = VopHelper::createHKVPPForPollingRequest($this->bpd, $pollingToken);
+            $message = MessageBuilder::create()->add($hkvpp);
+
+            // Add HKTAN for authentication if necessary.
+            if (!($this->getSelectedTanMode() instanceof NoPsd2TanMode)) {
+                if (($needTanForSegment = $action->getNeedTanForSegment()) !== null) {
+                    $message->add(HKTANFactory::createProzessvariante2Step1(
+                        $this->requireTanMode(), $this->selectedTanMedium, $needTanForSegment));
+                }
+            }
+
+            // Execute the request and process the response.
+            $response = $this->sendMessage($this->buildMessage($message, $this->getSelectedTanMode()));
+            $this->processServerResponse($action, $response, $hkvpp);
+        } else {
+            throw new \InvalidArgumentException('Unexpected polling token type: ' . gettype($pollingToken));
+        }
+    }
+
+    /**
      * Closes the session/dialog/connection, if open. This is equivalent to logging out. You should call this function
      * when you're done with all the actions, but NOT when you're persisting the instance to fulfill the TAN request of
      * an outstanding action.
@@ -542,7 +646,7 @@ class FinTs
      * from cached BPD/UPD upon the next {@link login()}, for instance.
      * @throws ServerException When closing the dialog fails.
      */
-    public function close()
+    public function close(): void
     {
         if ($this->dialogId !== null) {
             $this->endDialog();
@@ -556,7 +660,7 @@ class FinTs
      * This can be called by the application using this library when it just restored this FinTs instance from the
      * persisted format after a long time, during which the session/dialog has most likely expired on the server side.
      */
-    public function forgetDialog()
+    public function forgetDialog(): void
     {
         $this->dialogId = null;
     }
@@ -577,7 +681,9 @@ class FinTs
         $this->ensureTanModesAvailable();
         $result = [];
         foreach ($this->allowedTanModes as $tanModeId) {
-            if (!array_key_exists($tanModeId, $this->bpd->allTanModes)) continue;
+            if (!array_key_exists($tanModeId, $this->bpd->allTanModes)) {
+                continue;
+            }
             $result[$tanModeId] = $this->bpd->allTanModes[$tanModeId];
         }
         return $result;
@@ -628,7 +734,7 @@ class FinTs
      *     must be the value returned from {@link TanMedium::getName()} for one of the TAN media supported with that TAN
      *     mode. Use {@link getTanMedia()} to obtain a list of possible TAN media options.
      */
-    public function selectTanMode($tanMode, $tanMedium = null)
+    public function selectTanMode($tanMode, $tanMedium = null): void
     {
         if (!is_int($tanMode) && !($tanMode instanceof TanMode)) {
             throw new \InvalidArgumentException('tanMode must be an int or a TanMode');
@@ -668,7 +774,7 @@ class FinTs
      * @throws UnexpectedResponseException When the server does not send the BPD or close the dialog properly.
      * @throws ServerException When the server resopnds with an error.
      */
-    private function ensureBpdAvailable()
+    private function ensureBpdAvailable(): void
     {
         if ($this->bpd !== null) {
             return; // Nothing to do.
@@ -715,7 +821,7 @@ class FinTs
      *     like it should according to the protocol, or when the dialog is not closed properly.
      * @throws ServerException When the server responds with an error.
      */
-    private function ensureTanModesAvailable()
+    private function ensureTanModesAvailable(): void
     {
         if ($this->allowedTanModes === null) {
             $this->ensureBpdAvailable();
@@ -734,7 +840,7 @@ class FinTs
      *     dialog is not closed properly.
      * @throws ServerException When the server responds with an error.
      */
-    private function ensureSynchronized()
+    private function ensureSynchronized(): void
     {
         if ($this->kundensystemId === null) {
             $this->ensureBpdAvailable();
@@ -824,7 +930,7 @@ class FinTs
     /**
      * Closes the physical connection, if necessary.
      */
-    private function disconnect()
+    private function disconnect(): void
     {
         if ($this->connection !== null) {
             $this->connection->disconnect();
@@ -838,7 +944,7 @@ class FinTs
      * @param Message $fakeResponseMessage A messsage that contains the response segments for this action.
      * @throws UnexpectedResponseException When the server responded with a valid but unexpected message.
      */
-    private function processActionResponse(BaseAction $action, Message $fakeResponseMessage)
+    private function processActionResponse(BaseAction $action, Message $fakeResponseMessage): void
     {
         $action->processResponse($fakeResponseMessage);
         if ($action instanceof DialogInitialization) {
@@ -868,7 +974,7 @@ class FinTs
      *     properly.
      * @throws ServerException When the server responds with an error.
      */
-    private function executeWeakDialogInitialization(?string $hktanRef)
+    private function executeWeakDialogInitialization(?string $hktanRef): void
     {
         if ($this->dialogId !== null) {
             throw new \RuntimeException('Cannot init another dialog.');
@@ -909,7 +1015,7 @@ class FinTs
      * @throws ServerException When the server responds with an error instead of closing the dialog. This means that
      *     the connection is tainted and can probably not be used for another dialog.
      */
-    protected function endDialog(bool $isAnonymous = false)
+    protected function endDialog(bool $isAnonymous = false): void
     {
         if ($this->connection === null) {
             $this->dialogId = null;
@@ -947,7 +1053,7 @@ class FinTs
      * @param MessageBuilder $message The message to be built.
      * @param TanMode|null $tanMode Optionally a TAN mode that will be used when sending this message, defaults to 999
      *     (single step).
-     * @param string|null Optionally a TAN to sign this message with.
+     * @param string|null $tan Optionally a TAN to sign this message with.
      * @return Message The built message.
      */
     private function buildMessage(MessageBuilder $message, ?TanMode $tanMode = null, ?string $tan = null): Message
