@@ -80,8 +80,8 @@ class SendSEPATransfer extends BaseAction
             $segmentID = 'HICSES';
             $segment = \Fhp\Segment\CSE\HKCSEv1::createEmpty();
         } elseif ($numberOfTransactions > 1 && !$hasReqdExDates) {
-            // SEPA-Sammelüberweisungen (Segment HKCCM / Kennung HICCMS)
-            $segmentID = 'HICCMS';
+            // SEPA-Sammelüberweisungen (Segment HKCCM / Kennung HICMES)
+            $segmentID = 'HICMES';
             $segment = \Fhp\Segment\CCM\HKCCMv1::createEmpty();
             $segment->summenfeld = Btg::create($CtrlSum);
             $segment->einzelbuchungGewuenscht = $batchBooking;
