@@ -5,6 +5,9 @@ namespace Fhp;
 use Fhp\Model\NoPsd2TanMode;
 use Fhp\Model\TanMedium;
 use Fhp\Model\TanMode;
+use Fhp\Model\VopConfirmationRequest;
+use Fhp\Model\VopConfirmationRequestImpl;
+use Fhp\Model\VopPollingInfo;
 use Fhp\Options\Credentials;
 use Fhp\Options\FinTsOptions;
 use Fhp\Options\SanitizingLogger;
@@ -28,7 +31,6 @@ use Fhp\Segment\TAN\HKTANFactory;
 use Fhp\Segment\TAN\HKTANv6;
 use Fhp\Segment\VPP\HKVPPv1;
 use Fhp\Segment\VPP\VopHelper;
-use Fhp\Segment\VPP\VopPollingToken;
 use Fhp\Syntax\InvalidResponseException;
 use Psr\Log\LoggerInterface;
 use Psr\Log\NullLogger;
@@ -299,7 +301,7 @@ class FinTs
      * 2. If {@link BaseAction::needsPollingWait()} returns true, the action isn't completed yet because the server is
      *    still running some slow operation. Importantly, the server has not necessarily accepted the action yet, so it
      *    is absolutely required that the client keeps polling if they don't want the action to be abandoned.
-     *    In this case, use {@link BaseAction::getPollingToken()} to get more information on how frequently to poll, and
+     *    In this case, use {@link BaseAction::getPollingInfo()} to get more information on how frequently to poll, and
      *    do the polling through {@link pollAction()}.
      * 3. If {@link BaseAction::needsVopConfirmation()} returns true, the action isn't completed yet because the payee
      *    information couldn't be matched automatically, so an explicit confirmation from the user is required. In this
@@ -308,9 +310,14 @@ class FinTs
      *    Use the respective getters on the action instance to retrieve the result. In case the action fails, the
      *    corresponding exception will be thrown from this function.
      *
+     * Tip: In practice, polling (2.) and confirmation (3.) are needed only for Verification of Payee. So if your
+     * application only ever executes read-only actions like account statement fetching, but never executes any
+     * transfers, instead of handling these cases you could simply assert that {@link BaseAction::needsPollingWait()}
+     * and {@link BaseAction::needsVopConfirmation()} both return false.
+     *
      * Note that all conditions above that leave the action in an incomplete state require some action from the client
      * application. These actions then change the state of the action again, but they don't necessarily complete it.
-     * In practice, the typical sequence is: Maybe polling, maybe VoP confirmation, maybe TAN, done. That said, you
+     * In practice, the typical sequence is: Maybe polling, maybe VOP confirmation, maybe TAN, done. That said, you
      * should ideally implement your application to deal with any sequence of states. Just execute the action, check
      * what's state it's in, resolve that state as appropriate, and then check again (using the same code as before). Do
      * this repeatedly until none of the special conditions above happen anymore, at which point the action is done.
@@ -329,8 +336,7 @@ class FinTs
         }
 
         // Add the action's main request segments.
-        $requestSegments = $action->getNextRequest($this->getBpd(), $this->upd);
-
+        $requestSegments = $action->getNextRequest($this->bpd, $this->upd);
         if (count($requestSegments) === 0) {
             return; // No request needed.
         }
@@ -339,19 +345,19 @@ class FinTs
         // Add HKTAN for authentication if necessary.
         if (!($this->getSelectedTanMode() instanceof NoPsd2TanMode)) {
             if (($needTanForSegment = $action->getNeedTanForSegment()) !== null) {
-                $hktan = HKTANFactory::createProzessvariante2Step1($this->requireTanMode(), $this->selectedTanMedium, $needTanForSegment);
-                $message->add($hktan);
+                $message->add(HKTANFactory::createProzessvariante2Step1(
+                    $this->requireTanMode(), $this->selectedTanMedium, $needTanForSegment));
             }
         }
 
-        // Add HKVPP for VoP verification if necessary.
+        // Add HKVPP for VOP verification if necessary.
         $hkvpp = null;
         if ($this->bpd?->vopRequiredForRequest($requestSegments) !== null) {
             $hkvpp = VopHelper::createHKVPPForInitialRequest($this->bpd);
             $message->add($hkvpp);
         }
 
-        // Construct the request and tell the action about the segment numbers that were assigned.
+        // Construct the request message and tell the action about the segment numbers that were assigned.
         $request = $this->buildMessage($message, $this->getSelectedTanMode()); // This fills in the segment numbers.
         $action->setRequestSegmentNumbers(array_map(function ($segment) {
             /* @var BaseSegment $segment */
@@ -397,19 +403,18 @@ class FinTs
             return;
         }
 
-        // If no TAN is needed, process the response normally, and maybe keep going for more pages.
-        $requestSegmentsNumbers = $action->getRequestSegmentNumbers();
-        if (isset($hktan)) {
-            $requestSegmentsNumbers[] = $hktan->getSegmentNumber();
-        }
-        $this->processActionResponse($action, $response->filterByReferenceSegments($requestSegmentsNumbers));
-
         // Detect if the bank needs us to do something for Verification of Payee.
         if ($hkvpp != null) {
-            if ($pollingToken = VopHelper::checkPollingRequired($response, $hkvpp->getSegmentNumber())) {
-                $action->setPollingToken($pollingToken);
+            if ($pollingInfo = VopHelper::checkPollingRequired($response, $hkvpp->getSegmentNumber())) {
+                $action->setPollingInfo($pollingInfo);
                 return;
             }
+            if ($confirmationRequest = VopHelper::checkVopConfirmationRequired($response, $hkvpp->getSegmentNumber())) {
+                $action->setVopConfirmationRequest($confirmationRequest);
+                return;
+            }
+            // Note: It's possible we get VOP_AUSFUEHRUNGSAUFTRAG_NICHT_BENOETIGT, but we ignore it here because it's
+            // not actionable -- the action was completed without requiring verification after all.
         }
 
         // If no TAN or VOP is needed, process the response normally, and maybe keep going for more pages.
@@ -599,7 +604,7 @@ class FinTs
      *
      * After this function returns, the `$action` is in any of the same states as after {@link execute()}, see there. In
      * particular, it's possible that the long-running operation on the server has not completed yet and thus
-     * {@link BaseAction::needsPollingWait()} still returns `true`. In practice, actions often require VoP confirmation
+     * {@link BaseAction::needsPollingWait()} still returns `true`. In practice, actions often require VOP confirmation
      * or a TAN after the polling is over, though they can also complete right away.
      * In case the action fails, the corresponding exception will be thrown from this function.
      *
@@ -610,32 +615,79 @@ class FinTs
      *     that can go wrong with the action itself, like wrong credentials, invalid IBANs, locked accounts, etc.
      * @link FinTS_3.0_Messages_Geschaeftsvorfaelle_VOP_1.01_2025_06_27_FV.pdf
      * Section C.10.7.1.1 a)
-     *
      */
     public function pollAction(BaseAction $action): void
     {
-        $pollingToken = $action->getPollingToken();
-        if ($pollingToken === null) {
+        $pollingInfo = $action->getPollingInfo();
+        if ($pollingInfo === null) {
             throw new \InvalidArgumentException('This action is not awaiting polling for a long-running operation');
-        } elseif ($pollingToken instanceof VopPollingToken) {
+        } elseif ($pollingInfo instanceof VopPollingInfo) {
             // Only send a new HKVPP.
-            $hkvpp = VopHelper::createHKVPPForPollingRequest($this->bpd, $pollingToken);
+            $hkvpp = VopHelper::createHKVPPForPollingRequest($this->bpd, $pollingInfo);
             $message = MessageBuilder::create()->add($hkvpp);
-
-            // Add HKTAN for authentication if necessary.
-            if (!($this->getSelectedTanMode() instanceof NoPsd2TanMode)) {
-                if (($needTanForSegment = $action->getNeedTanForSegment()) !== null) {
-                    $message->add(HKTANFactory::createProzessvariante2Step1(
-                        $this->requireTanMode(), $this->selectedTanMedium, $needTanForSegment));
-                }
-            }
 
             // Execute the request and process the response.
             $response = $this->sendMessage($this->buildMessage($message, $this->getSelectedTanMode()));
+            $action->setPollingInfo(null);
             $this->processServerResponse($action, $response, $hkvpp);
         } else {
-            throw new \InvalidArgumentException('Unexpected polling token type: ' . gettype($pollingToken));
+            throw new \InvalidArgumentException('Unexpected PollingInfo type: ' . gettype($pollingInfo));
         }
+    }
+
+    /**
+     * For an action where {@link BaseAction::needsVopConfirmation()} returns `true`, this function re-submits the
+     * action with the additional confirmation from the user that they want to execute the transfer(s) after having
+     * reviewed the information from the {@link VopConfirmationRequest}.
+     * By using {@link persist()}, this can be done asynchronously, i.e., not in the same PHP process as the original
+     * {@link execute()} call.
+     *
+     * After this function returns, the `$action` is in any of the same states as after {@link execute()}, see there. In
+     * practice, actions often require a TAN after VOP is confirmed, though they can also complete right away.
+     * In case the action fails, the corresponding exception will be thrown from this function.
+     *
+     * @param BaseAction $action The action to be completed.
+     * @throws CurlException When the connection fails in a layer below the FinTS protocol.
+     * @throws UnexpectedResponseException When the server responds with a valid but unexpected message.
+     * @throws ServerException When the server responds with a (FinTS-encoded) error message, which includes most things
+     *     that can go wrong with the action itself, like wrong credentials, invalid IBANs, locked accounts, etc.
+     * @link FinTS_3.0_Messages_Geschaeftsvorfaelle_VOP_1.01_2025_06_27_FV.pdf
+     * Section C.10.7.1.2 a)
+     */
+    public function confirmVop(BaseAction $action): void
+    {
+        $vopConfirmationRequest = $action->getVopConfirmationRequest();
+        if (!($vopConfirmationRequest instanceof VopConfirmationRequestImpl)) {
+            throw new \InvalidArgumentException('Unexpected type: ' . gettype($vopConfirmationRequest));
+        }
+        // We need to send the original request again, plus HKVPA as the confirmation.
+        $requestSegments = $action->getNextRequest($this->bpd, $this->upd);
+        if (count($requestSegments) === 0) {
+            throw new \AssertionError('Request unexpectedly became empty upon VOP confirmation');
+        }
+        $message = MessageBuilder::create()
+            ->add($requestSegments)
+            ->add(VopHelper::createHKVPAForConfirmation($vopConfirmationRequest));
+
+        // Add HKTAN for authentication if necessary.
+        if (!($this->getSelectedTanMode() instanceof NoPsd2TanMode)) {
+            if (($needTanForSegment = $action->getNeedTanForSegment()) !== null) {
+                $message->add(HKTANFactory::createProzessvariante2Step1(
+                    $this->requireTanMode(), $this->selectedTanMedium, $needTanForSegment));
+            }
+        }
+
+        // Construct the request message and tell the action about the segment numbers that were assigned.
+        $request = $this->buildMessage($message, $this->getSelectedTanMode()); // This fills in the segment numbers.
+        $action->setRequestSegmentNumbers(array_map(function ($segment) {
+            /* @var BaseSegment $segment */
+            return $segment->getSegmentNumber();
+        }, $requestSegments));
+
+        // Execute the request and process the response.
+        $response = $this->sendMessage($this->buildMessage($message, $this->getSelectedTanMode()));
+        $action->setVopConfirmationRequest(null);
+        $this->processServerResponse($action, $response);
     }
 
     /**
