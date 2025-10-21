@@ -91,13 +91,13 @@ class VopHelper
         Message $response,
         int $hkvppSegmentNumber,
     ): ?VopConfirmationRequestImpl {
-        $rueckmeldung = $response->findRueckmeldung(
-            Rueckmeldungscode::VOP_ERGEBNIS_NAMENSABGLEICH_PRUEFEN,
-            $hkvppSegmentNumber
-        );
+        $codes = $response->findRueckmeldungscodesForReferenceSegment($hkvppSegmentNumber);
+        if (in_array(Rueckmeldungscode::VOP_AUSFUEHRUNGSAUFTRAG_NICHT_BENOETIGT, $codes)) {
+            return null;
+        }
         /** @var HIVPPv1 $hivpp */
         $hivpp = $response->findSegment(HIVPPv1::class);
-        if ($hivpp?->vopId === null || $rueckmeldung === null) {
+        if ($hivpp?->vopId === null) {
             return null;
         }
 

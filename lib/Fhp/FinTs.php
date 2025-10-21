@@ -384,9 +384,21 @@ class FinTs
     {
         $this->readBPD($response);
 
+        // Detect if the bank needs us to do something for Verification of Payee.
+        if ($hkvpp != null) {
+            if ($pollingInfo = VopHelper::checkPollingRequired($response, $hkvpp->getSegmentNumber())) {
+                $action->setPollingInfo($pollingInfo);
+                return;
+            }
+            if ($confirmationRequest = VopHelper::checkVopConfirmationRequired($response, $hkvpp->getSegmentNumber())) {
+                $action->setVopConfirmationRequest($confirmationRequest);
+            }
+        }
+
         // Detect if the bank wants a TAN.
         /** @var HITAN $hitan */
         $hitan = $response->findSegment(HITAN::class);
+        // Note: Instead of DUMMY_REFERENCE, it's officially the 3076 Rueckmeldungscode that tells we don't need a TAN.
         if ($hitan !== null && $hitan->getAuftragsreferenz() !== HITAN::DUMMY_REFERENCE) {
             if ($hitan->tanProzess !== HKTAN::TAN_PROZESS_4) {
                 throw new UnexpectedResponseException("Unsupported TAN request type $hitan->tanProzess");
@@ -400,21 +412,10 @@ class FinTs
                 $action->setDialogId($response->header->dialogId);
                 $action->setMessageNumber($this->messageNumber);
             }
-            return;
         }
 
-        // Detect if the bank needs us to do something for Verification of Payee.
-        if ($hkvpp != null) {
-            if ($pollingInfo = VopHelper::checkPollingRequired($response, $hkvpp->getSegmentNumber())) {
-                $action->setPollingInfo($pollingInfo);
-                return;
-            }
-            if ($confirmationRequest = VopHelper::checkVopConfirmationRequired($response, $hkvpp->getSegmentNumber())) {
-                $action->setVopConfirmationRequest($confirmationRequest);
-                return;
-            }
-            // Note: It's possible we get VOP_AUSFUEHRUNGSAUFTRAG_NICHT_BENOETIGT, but we ignore it here because it's
-            // not actionable -- the action was completed without requiring verification after all.
+        if ($action->needsVopConfirmation() || $action->needsTan()) {
+            return; // The action isn't complete yet.
         }
 
         // If no TAN or VOP is needed, process the response normally, and maybe keep going for more pages.
