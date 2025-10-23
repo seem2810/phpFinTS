@@ -33,12 +33,13 @@ class VopVerificationResult
     }
 
     /**
-     * @param string $codeFromBank The verification status code received from the bank.
+     * @param ?string $codeFromBank The verification status code received from the bank.
      * @return ?string One of the constants defined above, or null if the code could not be recognized.
      */
-    public static function parse(string $codeFromBank): ?string
+    public static function parse(?string $codeFromBank): ?string
     {
         return match ($codeFromBank) {
+            null => null,
             'RCVC' => self::CompletedFullMatch,
             'RVMC' => self::CompletedCloseMatch,
             'RVNM' => self::CompletedNoMatch,

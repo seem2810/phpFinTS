@@ -8,6 +8,7 @@ use Fhp\Model\TanMode;
 use Fhp\Model\VopConfirmationRequest;
 use Fhp\Model\VopConfirmationRequestImpl;
 use Fhp\Model\VopPollingInfo;
+use Fhp\Model\VopVerificationResult;
 use Fhp\Options\Credentials;
 use Fhp\Options\FinTsOptions;
 use Fhp\Options\SanitizingLogger;
@@ -384,17 +385,6 @@ class FinTs
     {
         $this->readBPD($response);
 
-        // Detect if the bank needs us to do something for Verification of Payee.
-        if ($hkvpp != null) {
-            if ($pollingInfo = VopHelper::checkPollingRequired($response, $hkvpp->getSegmentNumber())) {
-                $action->setPollingInfo($pollingInfo);
-                return;
-            }
-            if ($confirmationRequest = VopHelper::checkVopConfirmationRequired($response, $hkvpp->getSegmentNumber())) {
-                $action->setVopConfirmationRequest($confirmationRequest);
-            }
-        }
-
         // Detect if the bank wants a TAN.
         /** @var HITAN $hitan */
         $hitan = $response->findSegment(HITAN::class);
@@ -411,6 +401,30 @@ class FinTs
             if ($action instanceof DialogInitialization) {
                 $action->setDialogId($response->header->dialogId);
                 $action->setMessageNumber($this->messageNumber);
+            }
+        }
+
+        // Detect if the bank needs us to do something for Verification of Payee.
+        if ($hkvpp != null) {
+            if ($pollingInfo = VopHelper::checkPollingRequired($response, $hkvpp->getSegmentNumber())) {
+                $action->setPollingInfo($pollingInfo);
+                if ($action->needsTan()) {
+                    throw new UnexpectedResponseException('Unexpected polling and TAN request in the same response.');
+                }
+                return;
+            }
+            if ($confirmationRequest = VopHelper::checkVopConfirmationRequired($response, $hkvpp->getSegmentNumber())) {
+                $action->setVopConfirmationRequest($confirmationRequest);
+                if ($action->needsTan()) {
+                    if ($confirmationRequest->getVerificationResult() === VopVerificationResult::CompletedFullMatch) {
+                        // If someone hits this branch in practice, we can implement it.
+                        throw new UnsupportedException('Combined VOP match confirmation and TAN request');
+                    } else {
+                        throw new UnexpectedResponseException(
+                            'Unexpected TAN request on VOP result: ' . $confirmationRequest->getVerificationResult()
+                        );
+                    }
+                }
             }
         }
 
