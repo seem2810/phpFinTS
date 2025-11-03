@@ -8,7 +8,7 @@ use Fhp\Protocol\UPD;
 use Fhp\Segment\HIRMS\Rueckmeldungscode;
 use Fhp\Segment\VPP\HIVPPSv1;
 use Fhp\Segment\VPP\HIVPPv1;
-use Fhp\Segment\VPP\HKVPAv1;
+use Fhp\Segment\VPA\HKVPAv1;
 use Fhp\Segment\VPP\HKVPPv1;
 use Fhp\UnsupportedException;
 
@@ -24,6 +24,8 @@ class SendSEPATransferVoP extends SendSEPATransfer
 
     protected $vopConfirmed = false;
 
+    protected bool $requestVopInSameMessage = true;
+
     /**
      * If set, the last response from the server regarding this action indicated that there are more results to be
      * fetched using this pagination token. This is called "Aufsetzpunkt" in the specification.
@@ -34,22 +36,34 @@ class SendSEPATransferVoP extends SendSEPATransfer
     public ?HKVPPv1 $hkvpp = null;
     public ?HIVPPv1 $hivpp = null;
 
+    public function setRequestVopInSameMessage(bool $flag): void
+    {
+        $this->requestVopInSameMessage = $flag;
+    }
+
     protected function createRequest(BPD $bpd, ?UPD $upd)
     {
         // Do we need to ask for the VoP result?
         if ($this->vopIsPending) {
-            $this->hkvpp->pollingId = $this->hivpp->pollingId;
+            if ($this->hkvpp === null) {
+                $this->hkvpp = HKVPPv1::createEmpty();
+                /** @var HIVPPSv1 $hivpps */
+                if ($hivpps = $bpd->getLatestSupportedParameters('HIVPPS')) {
+                    $supportedFormats = explode(';', $hivpps->parameter->unterstuetztePaymentStatusReportDatenformate);
+                    $this->hkvpp->unterstuetztePaymentStatusReports->paymentStatusReportDescriptor = $supportedFormats;
+                }
+            }
+            $this->hkvpp->pollingId = $this->hivpp?->pollingId;
             $this->hkvpp->aufsetzpunkt = $this->paginationToken;
             return $this->hkvpp;
         }
 
         $requestSegment = parent::createRequest($bpd, $upd);
-        $requestSegments = [$requestSegment];
 
         if ($this->vopNeedsConfirmation && $this->vopConfirmed) {
 
             $hkvpa = HKVPAv1::createEmpty();
-            $hkvpa->vopId = $this->hivpp->vopId;
+            $hkvpa->vopId = $this->hivpp?->vopId;
             return [$hkvpa, $requestSegment];
         }
 
@@ -64,24 +78,28 @@ class SendSEPATransferVoP extends SendSEPATransfer
 
                 // Send VoP confirmation
                 if ($this->needsConfirmation() && $this->hivpp?->vopId) {
-                    $hkvpp = HKVPAv1::createEmpty();
-                    $hkvpp->vopId = $this->hivpp->vopId;
-                    $requestSegments = [$hkvpp, $requestSegment];
-                } else {
+                    $hkvpa = HKVPAv1::createEmpty();
+                    $hkvpa->vopId = $this->hivpp->vopId;
+                    return [$hkvpa, $requestSegment];
+                }
+
+                if ($this->requestVopInSameMessage) {
                     // Ask for VoP
-                    $this->hkvpp = $hkvpp = HKVPPv1::createEmpty();
+                    $this->hkvpp = HKVPPv1::createEmpty();
 
                     // For now just pretend we support all formats
                     $supportedFormats = explode(';', $hivpps->parameter->unterstuetztePaymentStatusReportDatenformate);
-                    $hkvpp->unterstuetztePaymentStatusReports->paymentStatusReportDescriptor = $supportedFormats;
+                    $this->hkvpp->unterstuetztePaymentStatusReports->paymentStatusReportDescriptor = $supportedFormats;
 
                     // VoP before the transfer request
-                    $requestSegments = [$hkvpp, $requestSegment];
+                    return [$this->hkvpp, $requestSegment];
                 }
+
+                return [$requestSegment];
             }
         }
 
-        return $requestSegments;
+        return [$requestSegment];
     }
 
     public function processResponse(Message $response)
@@ -104,7 +122,7 @@ class SendSEPATransferVoP extends SendSEPATransfer
         }
 
         if (($pagination = $response->findRueckmeldung(Rueckmeldungscode::PAGINATION)) !== null) {
-            $this->paginationToken = $pagination->rueckmeldungsparameter[0];
+            $this->paginationToken = $pagination->rueckmeldungsparameter[0] ?? null;
         }
 
         if (
@@ -118,7 +136,7 @@ class SendSEPATransferVoP extends SendSEPATransfer
         ) {
             $this->vopNeedsConfirmation = true;
             // Is the result already available?
-            if (!$this->hivpp->vopId) {
+            if (!$this->hivpp?->vopId) {
                 $this->vopIsPending = true;
             }
             return;
