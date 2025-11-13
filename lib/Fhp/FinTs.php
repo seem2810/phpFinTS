@@ -159,6 +159,7 @@ class FinTs
      *     carefully (not written to log files, only to a database or other storage system that would normally be used
      *     for user data). The returned string never contains highly sensitive information (not the user's password or
      *     PIN), so it probably does not need to be encrypted. Treat it like a session cookie of the same bank.
+     *     Note that this is not necessarily valid UTF-8, so you should store it as a BLOB column or raw bytes.
      */
     public function persist(bool $minimal = false): string
     {
@@ -374,6 +375,16 @@ class FinTs
         $this->processActionResponse($action, $response->filterByReferenceSegments($action->getRequestSegmentNumbers()));
         if ($action instanceof PaginateableAction && $action->hasMorePages()) {
             $this->execute($action);
+        }
+
+        // Check whether the server requested a Kundensystem-ID refresh.
+        if ($response->findRueckmeldung(Rueckmeldungscode::NEUE_KUNDENSYSTEM_ID_HOLEN) !== null) {
+            // TODO Properly implement the refresh here, see https://github.com/nemiah/phpFinTS/issues/458.
+            $this->logger->warning(
+                'The server asked us to refresh the Kundensystem-ID in response to a ' . gettype($action) .
+                ' action, but that is not implemented yet. This could result in authentication errors or extraneous ' .
+                ' re-authentication prompts from the bank.'
+            );
         }
     }
 
