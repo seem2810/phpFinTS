@@ -77,7 +77,7 @@ abstract class Serializer
      */
     public static function serializeSegments(array $segments): string
     {
-        return implode(array_map(['self', 'serializeSegment'], $segments));
+        return implode(array_map([self::class, 'serializeSegment'], $segments));
     }
 
     /**
@@ -130,6 +130,7 @@ abstract class Serializer
                         $value === null || $repetition >= count($value) ? null : $value[$repetition],
                         $elementDescriptor->type, $isSegment);
                 }
+                $index += $numOutputElements - 1; // The outer loop will increment by 1 as well.
             }
         }
         return $serializedElements;
